@@ -1,0 +1,9 @@
+
+{
+  "name": "JellyTube",
+  "version": "0.1.0",
+  "description": "Browse and play YouTube via jellytube (yt-dlp + Invidious/Piped).",
+  "id": "com.example.jellytube",
+  "targetAbi": "10.8.0",
+  "guid": "e2a6b8b6-16b9-4a65-9b2f-1a2f2d3e5abc"
+}

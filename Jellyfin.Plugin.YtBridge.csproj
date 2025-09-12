@@ -1,0 +1,19 @@
+
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <GenerateRuntimeConfigurationFiles>true</GenerateRuntimeConfigurationFiles>
+    <AssemblyName>Jellyfin.Plugin.JellyTube</AssemblyName>
+    <RootNamespace>Jellyfin.Plugin.JellyTube</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Pin these to match your Jellyfin server's target ABI (10.8.x as of writing) -->
+    <PackageReference Include="Jellyfin.Controller" Version="10.8.0" />
+    <PackageReference Include="Jellyfin.Model" Version="10.8.0" />
+    <PackageReference Include="Jellyfin.Common" Version="10.8.0" />
+  </ItemGroup>
+</Project>
