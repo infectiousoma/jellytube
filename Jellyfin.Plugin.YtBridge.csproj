@@ -1,19 +1,27 @@
-
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
     <GenerateRuntimeConfigurationFiles>true</GenerateRuntimeConfigurationFiles>
     <AssemblyName>Jellyfin.Plugin.JellyTube</AssemblyName>
     <RootNamespace>Jellyfin.Plugin.JellyTube</RootNamespace>
+    <!-- Disable auto-generated assembly attributes to avoid conflicts -->
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Pin these to match your Jellyfin server's target ABI (10.8.x as of writing) -->
-    <PackageReference Include="Jellyfin.Controller" Version="10.8.0" />
-    <PackageReference Include="Jellyfin.Model" Version="10.8.0" />
-    <PackageReference Include="Jellyfin.Common" Version="10.8.0" />
+    <!-- Match these to your Jellyfin server's Target ABI if different -->
+    <PackageReference Include="Jellyfin.Controller" Version="10.10.7" />
+    <PackageReference Include="Jellyfin.Model" Version="10.10.7" />
+    <PackageReference Include="Jellyfin.Common" Version="10.10.7" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="Channels/YtBridgeChannel.cs" />
+    <Compile Remove="Providers/*.cs" />
+    <Compile Remove="MediaSources/*.cs" />
   </ItemGroup>
 </Project>

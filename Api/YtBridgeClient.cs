@@ -20,7 +20,7 @@ public class YtBridgeClient
         _http = http;
         Base = cfg.BackendBaseUrl.TrimEnd('/');
         _demoMode = cfg.DemoMode;
-        _demoQueries = cfg.DemoQueries ?? Array.Empty<string>();
+        _demoQueries = cfg.DemoQueries ?? new List<string>();
     }
 
     private async Task<JsonDocument> GetAsync(string url, CancellationToken ct)

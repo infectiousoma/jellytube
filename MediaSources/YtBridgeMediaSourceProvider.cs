@@ -11,10 +11,10 @@ namespace Jellyfin.Plugin.JellyTube;
 
 public class JellyTubeMediaSourceProvider : IMediaSourceProvider
 {
-    private readonly JellyTubeClient _client;
+    private readonly YtBridgeClient _client;
     private readonly PluginConfiguration _cfg;
 
-    public JellyTubeMediaSourceProvider(JellyTubeClient client, PluginConfiguration cfg)
+    public JellyTubeMediaSourceProvider(YtBridgeClient client, PluginConfiguration cfg)
     {
         _client = client;
         _cfg = cfg;
