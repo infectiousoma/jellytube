@@ -24,4 +24,9 @@
     <Compile Remove="Providers/*.cs" />
     <Compile Remove="MediaSources/*.cs" />
   </ItemGroup>
+
+<ItemGroup>
+  <EmbeddedResource Include="Web/jellytube.html" LogicalName="Jellyfin.Plugin.JellyTube.Web.jellytube.html" />
+</ItemGroup>
+
 </Project>
