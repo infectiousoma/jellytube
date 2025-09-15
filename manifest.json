@@ -1,0 +1,14 @@
+{
+  "name": "JellyTube",
+  "description": "Browse and play YouTube via jellytube (yt-dlp + Invidious/Piped).",
+  "overview": "YouTube bridge demo channel.",
+  "owner": "JellyTube Plugin",
+  "category": "Channel",
+  "guid": "e2a6b8b6-16b9-4a65-9b2f-1a2f2d3e5abc",
+  "version": "0.1.0.0",
+  "targetAbi": "10.10.7",
+  "framework": "net8.0",
+  "imageUrl": "",
+  "changelog": "",
+  "native": false
+}

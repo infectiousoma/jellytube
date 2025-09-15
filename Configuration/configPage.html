@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>JellyTube Settings</title>
+</head>
+<body>
+  <div data-role="page"
+       class="page type-interior pluginConfigurationPage"
+       data-require="emby-button,emby-input">
+    <div data-role="content">
+      <div class="content-primary">
+        <form class="configForm">
+          <h2>JellyTube</h2>
+
+          <div class="inputContainer">
+            <label class="inputLabel inputLabelUnfocused" for="backendBaseUrl">Backend Base URL</label>
+            <input id="backendBaseUrl" name="backendBaseUrl" type="text" is="emby-input" />
+          </div>
+
+          <div class="inputContainer">
+            <label class="inputLabel inputLabelUnfocused" for="formatPolicy">Format Policy</label>
+            <input id="formatPolicy" name="formatPolicy" type="text" is="emby-input" value="h264_mp4"/>
+          </div>
+
+          <button is="emby-button" type="submit" class="raised button-submit block emby-button">
+            Save
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  (function () {
+    // MUST match Plugin.Id in your Plugin.cs
+    const pluginId = 'e2a6b8b6-16b9-4a65-9b2f-1a2f2d3e5abc';
+
+    const page = document.querySelector('.pluginConfigurationPage');
+    const form = page.querySelector('.configForm');
+    const backendBaseUrl = page.querySelector('#backendBaseUrl');
+    const formatPolicy   = page.querySelector('#formatPolicy');
+
+    async function loadConfig() {
+      try {
+        const cfg = await ApiClient.getPluginConfiguration(pluginId);
+        // Property names must match PluginConfiguration.cs
+        backendBaseUrl.value = cfg.BackendBaseUrl || 'http://localhost:8080';
+        formatPolicy.value   = cfg.FormatPolicy   || 'h264_mp4';
+      } catch (e) {
+        console.error('Failed to load JellyTube config:', e);
+      }
+    }
+
+    async function saveConfig(e) {
+      e.preventDefault();
+      try {
+        const cfg = await ApiClient.getPluginConfiguration(pluginId);
+        cfg.BackendBaseUrl = backendBaseUrl.value.trim();
+        cfg.FormatPolicy   = formatPolicy.value.trim();
+
+        const result = await ApiClient.updatePluginConfiguration(pluginId, cfg);
+        Dashboard.processPluginConfigurationUpdateResult(result);
+      } catch (err) {
+        console.error('Failed to save JellyTube config:', err);
+        Dashboard.alert('Failed to save settings. See server logs for details.');
+      }
+    }
+
+    // Hook lifecycle: Jellyfin triggers 'pageshow' when the page becomes visible
+    page.addEventListener('pageshow', loadConfig);
+    form.addEventListener('submit', saveConfig);
+  })();
+  </script>
+</body>
+</html>

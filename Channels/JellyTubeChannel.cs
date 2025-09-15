@@ -1,42 +1,43 @@
-// File: Channels/JellyTubeChannel.cs
 using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
-using MediaBrowser.Controller.Channels;   // IChannel, IRequiresMediaInfoCallback, InternalChannelItemQuery, InternalChannelFeatures
+using MediaBrowser.Controller.Channels;
 using MediaBrowser.Controller.Providers;  // DynamicImageResponse
-using MediaBrowser.Model.Channels;        // ChannelItemInfo, ChannelItemType, ChannelMediaType, ChannelMediaContentType, ChannelFolderType, ChannelParentalRating, ChannelItemResult
-using MediaBrowser.Model.Dto;             // MediaSourceInfo
-using MediaBrowser.Model.Entities;        // ImageType
-using MediaBrowser.Model.MediaInfo;       // MediaProtocol
+using MediaBrowser.Model.Channels;
+using MediaBrowser.Model.Dto;
+using MediaBrowser.Model.Entities;
+using MediaBrowser.Model.MediaInfo;
 
 namespace Jellyfin.Plugin.JellyTube.Channels
 {
     public class JellyTubeChannel : IChannel, IRequiresMediaInfoCallback
     {
+        public JellyTubeChannel()
+        {
+            // Simple constructor without logger
+        }
+
         public string Name => "JellyTube";
         public string Description => "Browse and play YouTube via JellyTube bridge (demo)";
         public string HomePageUrl => string.Empty;
         public string DataVersion => "0.0.1";
         public ChannelParentalRating ParentalRating => ChannelParentalRating.GeneralAudience;
 
-        public InternalChannelFeatures GetChannelFeatures()
+        public InternalChannelFeatures GetChannelFeatures() => new InternalChannelFeatures
         {
-            return new InternalChannelFeatures
-            {
-                MaxPageSize = 50,
-                ContentTypes = new List<ChannelMediaContentType> { ChannelMediaContentType.Clip },
-                MediaTypes = new List<ChannelMediaType> { ChannelMediaType.Video },
-                SupportsSortOrderToggle = true,
-                AutoRefreshLevels = 0,
-                SupportsContentDownloading = false
-            };
-        }
+            MaxPageSize = 50,
+            ContentTypes = new List<ChannelMediaContentType> { ChannelMediaContentType.Clip },
+            MediaTypes   = new List<ChannelMediaType> { ChannelMediaType.Video },
+            SupportsSortOrderToggle = true,
+            AutoRefreshLevels = 0,
+            SupportsContentDownloading = false
+        };
 
         public bool IsEnabledFor(string userId) => true;
 
-        public Task<ChannelItemResult> GetChannelItems(InternalChannelItemQuery query, CancellationToken cancellationToken)
+        public Task<ChannelItemResult> GetChannelItems(InternalChannelItemQuery query, CancellationToken ct)
         {
             if (string.IsNullOrEmpty(query.FolderId))
             {
@@ -109,14 +110,10 @@ namespace Jellyfin.Plugin.JellyTube.Channels
 
         public IEnumerable<ImageType> GetSupportedChannelImages() => new[] { ImageType.Primary };
 
-        // Correct signature for Jellyfin 10.10.7
-        public Task<DynamicImageResponse?> GetChannelImage(ImageType imageType, CancellationToken cancellationToken)
-        {
-            // No custom channel image → let Jellyfin use the default icon
-            return Task.FromResult<DynamicImageResponse?>(null);
-        }
+        public Task<DynamicImageResponse?> GetChannelImage(ImageType imageType, CancellationToken ct)
+            => Task.FromResult<DynamicImageResponse?>(null);
 
-        public Task<IEnumerable<MediaSourceInfo>> GetChannelItemMediaInfo(string id, CancellationToken cancellationToken)
+        public Task<IEnumerable<MediaSourceInfo>> GetChannelItemMediaInfo(string id, CancellationToken ct)
         {
             string? url = id switch
             {

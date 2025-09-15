@@ -1,0 +1,5 @@
+{
+  "msbuild-sdks": {
+    "Microsoft.NET.Sdk": "8.0.100"
+  }
+}
