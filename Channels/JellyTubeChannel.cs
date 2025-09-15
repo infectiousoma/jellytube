@@ -4,7 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using MediaBrowser.Controller.Channels;
-using MediaBrowser.Controller.Providers;  // DynamicImageResponse
+using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Channels;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
@@ -16,7 +16,8 @@ namespace Jellyfin.Plugin.JellyTube.Channels
     {
         public JellyTubeChannel()
         {
-            // Simple constructor without logger
+            // Log that the channel is being constructed
+            System.Diagnostics.Debug.WriteLine("JellyTubeChannel constructor called");
         }
 
         public string Name => "JellyTube";
@@ -25,20 +26,30 @@ namespace Jellyfin.Plugin.JellyTube.Channels
         public string DataVersion => "0.0.1";
         public ChannelParentalRating ParentalRating => ChannelParentalRating.GeneralAudience;
 
-        public InternalChannelFeatures GetChannelFeatures() => new InternalChannelFeatures
+        public InternalChannelFeatures GetChannelFeatures()
         {
-            MaxPageSize = 50,
-            ContentTypes = new List<ChannelMediaContentType> { ChannelMediaContentType.Clip },
-            MediaTypes   = new List<ChannelMediaType> { ChannelMediaType.Video },
-            SupportsSortOrderToggle = true,
-            AutoRefreshLevels = 0,
-            SupportsContentDownloading = false
-        };
+            System.Diagnostics.Debug.WriteLine("JellyTubeChannel.GetChannelFeatures called");
+            return new InternalChannelFeatures
+            {
+                MaxPageSize = 50,
+                ContentTypes = new List<ChannelMediaContentType> { ChannelMediaContentType.Clip },
+                MediaTypes = new List<ChannelMediaType> { ChannelMediaType.Video },
+                SupportsSortOrderToggle = true,
+                AutoRefreshLevels = 0,
+                SupportsContentDownloading = false
+            };
+        }
 
-        public bool IsEnabledFor(string userId) => true;
+        public bool IsEnabledFor(string userId)
+        {
+            System.Diagnostics.Debug.WriteLine($"JellyTubeChannel.IsEnabledFor called with userId: {userId}");
+            return true;
+        }
 
         public Task<ChannelItemResult> GetChannelItems(InternalChannelItemQuery query, CancellationToken ct)
         {
+            System.Diagnostics.Debug.WriteLine($"JellyTubeChannel.GetChannelItems called with FolderId: {query.FolderId}");
+            
             if (string.IsNullOrEmpty(query.FolderId))
             {
                 var rows = new List<ChannelItemInfo>
@@ -111,15 +122,20 @@ namespace Jellyfin.Plugin.JellyTube.Channels
         public IEnumerable<ImageType> GetSupportedChannelImages() => new[] { ImageType.Primary };
 
         public Task<DynamicImageResponse?> GetChannelImage(ImageType imageType, CancellationToken ct)
-            => Task.FromResult<DynamicImageResponse?>(null);
+        {
+            System.Diagnostics.Debug.WriteLine($"JellyTubeChannel.GetChannelImage called with imageType: {imageType}");
+            return Task.FromResult<DynamicImageResponse?>(null);
+        }
 
         public Task<IEnumerable<MediaSourceInfo>> GetChannelItemMediaInfo(string id, CancellationToken ct)
         {
+            System.Diagnostics.Debug.WriteLine($"JellyTubeChannel.GetChannelItemMediaInfo called with id: {id}");
+            
             string? url = id switch
             {
                 "demo:bbb" => "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
-                "demo:ed"  => "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
-                _          => null
+                "demo:ed" => "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
+                _ => null
             };
 
             if (url is null)

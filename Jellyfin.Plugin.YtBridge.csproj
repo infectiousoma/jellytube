@@ -24,7 +24,6 @@
 <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.2" />
 </ItemGroup>
 <ItemGroup>
-<Compile Remove="Channels/YtBridgeChannel.cs" />
 <Compile Remove="Providers/*.cs" />
 <Compile Remove="MediaSources/*.cs" />
 </ItemGroup>
@@ -32,5 +31,4 @@
   <EmbeddedResource Include="Configuration/configPage.html"
                     LogicalName="Jellyfin.Plugin.JellyTube.Configuration.configPage.html" />
 </ItemGroup>
-
 </Project>
