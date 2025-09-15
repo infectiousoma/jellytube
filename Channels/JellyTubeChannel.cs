@@ -16,7 +16,6 @@ namespace Jellyfin.Plugin.JellyTube.Channels
     {
         public JellyTubeChannel()
         {
-            // Log that the channel is being constructed
             System.Diagnostics.Debug.WriteLine("JellyTubeChannel constructor called");
         }
 
@@ -49,7 +48,7 @@ namespace Jellyfin.Plugin.JellyTube.Channels
         public Task<ChannelItemResult> GetChannelItems(InternalChannelItemQuery query, CancellationToken ct)
         {
             System.Diagnostics.Debug.WriteLine($"JellyTubeChannel.GetChannelItems called with FolderId: {query.FolderId}");
-            
+
             if (string.IsNullOrEmpty(query.FolderId))
             {
                 var rows = new List<ChannelItemInfo>
@@ -130,33 +129,54 @@ namespace Jellyfin.Plugin.JellyTube.Channels
         public Task<IEnumerable<MediaSourceInfo>> GetChannelItemMediaInfo(string id, CancellationToken ct)
         {
             System.Diagnostics.Debug.WriteLine($"JellyTubeChannel.GetChannelItemMediaInfo called with id: {id}");
-            
+        
+            // Map demo ids to HTTP MP4s
             string? url = id switch
             {
                 "demo:bbb" => "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
-                "demo:ed" => "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
-                _ => null
+                "demo:ed"  => "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
+                _          => null
             };
-
+        
             if (url is null)
                 return Task.FromResult<IEnumerable<MediaSourceInfo>>(Array.Empty<MediaSourceInfo>());
-
-            var sources = new[]
+        
+            // Tell Jellyfin “this is a remote MP4 with H.264 + AAC; please direct play; do NOT transcode”
+            var src = new MediaSourceInfo
             {
-                new MediaSourceInfo
+                Id = id,                        // any opaque id for this media source
+                Path = url,                     // direct HTTP URL
+                Protocol = MediaProtocol.Http,
+                Container = "mp4",
+                IsRemote = true,
+        
+                // 🔑 The important bits to avoid HLS:
+                SupportsDirectPlay = true,
+                SupportsDirectStream = true,
+                SupportsTranscoding = false,
+                // Jellyfin sometimes flips to HLS if it can’t infer codecs/streams — be explicit:
+                MediaStreams = new List<MediaStream>
                 {
-                    Id = id,
-                    Path = url,
-                    Protocol = MediaProtocol.Http,
-                    Container = "mp4",
-                    SupportsDirectPlay = true,
-                    SupportsTranscoding = true,
-                    IsInfiniteStream = false,
-                    RequiresOpening = false
-                }
+                    new MediaStream
+                    {
+                        Type = MediaStreamType.Video,
+                        Codec = "h264",         // these demo files are H.264
+                        // You can omit bitrate/width/height; Jellyfin can probe if needed
+                    },
+                    new MediaStream
+                    {
+                        Type = MediaStreamType.Audio,
+                        Codec = "aac",
+                        Channels = 2
+                    }
+                },
+                // You can keep these as-is
+                IsInfiniteStream = false,
+                RequiresOpening = false
             };
-
-            return Task.FromResult<IEnumerable<MediaSourceInfo>>(sources);
+        
+            return Task.FromResult<IEnumerable<MediaSourceInfo>>(new[] { src });
         }
+
     }
 }
