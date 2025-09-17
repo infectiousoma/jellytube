@@ -3,15 +3,16 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
 using System.Text.Json;
-using System.Text.RegularExpressions; // ← added
+using System.Text.Json.Serialization; // ← added
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.Channels;
+using MediaBrowser.Controller.Providers; // DynamicImageResponse
 using MediaBrowser.Model.Channels;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.MediaInfo;
-using MediaBrowser.Controller.Providers; // DynamicImageResponse
 
 namespace Jellyfin.Plugin.JellyTube.Channels
 {
@@ -176,80 +177,86 @@ namespace Jellyfin.Plugin.JellyTube.Channels
             return Task.FromResult<DynamicImageResponse>(null!);
         }
 
-        // ====== UPDATED METHOD ======
+        // ====== MEDIA INFO (muxed-first with split fallback) ======
         public async Task<IEnumerable<MediaSourceInfo>> GetChannelItemMediaInfo(string id, CancellationToken ct)
         {
             var vid = id.StartsWith("vid:", StringComparison.Ordinal) ? id.Substring(4) : id;
             if (string.IsNullOrWhiteSpace(vid))
                 return Array.Empty<MediaSourceInfo>();
 
-            // Ask the bridge what formats exist
-            string json;
+            // 1) Try muxed via /resolve (so we know if the current URL is valid)
             try
             {
-                using var resp = await Http.GetAsync($"{BackendBase}/formats/{vid}", ct);
-                resp.EnsureSuccessStatusCode();
-                json = await resp.Content.ReadAsStringAsync(ct);
+                var policy = Uri.EscapeDataString(Cfg.FormatPolicy ?? "h264_mp4");
+                var resolveUrl = $"{BackendBase}/resolve?video_id={Uri.EscapeDataString(vid)}&policy={policy}";
+                using var r = await Http.GetAsync(resolveUrl, ct);
+                if (r.IsSuccessStatusCode)
+                {
+                    var txt = await r.Content.ReadAsStringAsync(ct);
+                    using var doc = JsonDocument.Parse(txt);
+                    if (doc.RootElement.TryGetProperty("kind", out var k) &&
+                        k.ValueKind == JsonValueKind.String &&
+                        string.Equals(k.GetString(), "muxed", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var mediaUrl = $"{BackendBase}/play/{vid}?policy={policy}";
+                        return new[]
+                        {
+                            new MediaSourceInfo
+                            {
+                                Id = vid,
+                                Path = mediaUrl,
+                                Protocol = MediaProtocol.Http,
+                                Container = "mp4",
+                                SupportsDirectPlay = true,
+                                SupportsDirectStream = true,
+                                SupportsTranscoding = true,
+                                IsInfiniteStream = false,
+                                RequiresOpening = false,
+                                Name = "YouTube (muxed MP4)"
+                            }
+                        };
+                    }
+                }
             }
             catch
             {
-                // Bridge unreachable → fallback single source using policy
-                return new[] { FallbackSource(id, vid) };
+                // ignore; fall through to split
             }
 
-            using var doc = JsonDocument.Parse(json);
-            if (!doc.RootElement.TryGetProperty("formats", out var arr) || arr.ValueKind != JsonValueKind.Array)
-                return new[] { FallbackSource(id, vid) };
-
-            var sources = new List<(MediaSourceInfo ms, int height, bool isItag18)>();
-
-            foreach (var f in arr.EnumerateArray())
+            // 2) Fallback to split: pick a good video-only itag and let the bridge live-remux to MP4
+            try
             {
-                var itag = Prop(f, "itag");
-                if (string.IsNullOrWhiteSpace(itag))
-                    continue;
-
-                var hasVideo = Bool(f, "has_video");
-                var hasAudio = Bool(f, "has_audio");
-                var ext = Prop(f, "ext") ?? "mp4";
-                var height = TryInt(f, "height") ?? 0;
-
-                // Skip audio-only rows in UI
-                if (!hasVideo && hasAudio)
-                    continue;
-
-                var flavor = hasVideo && hasAudio ? "progressive" : "video-only";
-                var labelHeight = height > 0 ? $"{height}p" : "auto";
-                var name = $"YouTube {labelHeight} {flavor} (itag {itag})";
-
-                var ms = new MediaSourceInfo
+                var itag = await PickBestVideoOnlyItagAsync(vid, targetHeight: 720, ct);
+                if (!string.IsNullOrEmpty(itag))
                 {
-                    Id = $"{id}@{itag}",
-                    Path = $"{BackendBase}/play/{vid}?itag={Uri.EscapeDataString(itag)}",
-                    Protocol = MediaProtocol.Http,
-                    Container = ext,
-                    SupportsDirectPlay = true,   // progressive direct; split remux still ok
-                    SupportsTranscoding = true,
-                    Name = name
-                };
-
-                sources.Add((ms, height, itag == "18"));
+                    var mediaUrl = $"{BackendBase}/play/{vid}?itag={Uri.EscapeDataString(itag)}";
+                    return new[]
+                    {
+                        new MediaSourceInfo
+                        {
+                            Id = vid,
+                            Path = mediaUrl,
+                            Protocol = MediaProtocol.Http,
+                            Container = "mp4", // bridge outputs fMP4 when remuxing
+                            SupportsDirectPlay = true,
+                            SupportsDirectStream = true,
+                            SupportsTranscoding = true,
+                            IsInfiniteStream = false,
+                            RequiresOpening = false,
+                            Name = $"YouTube 720p (split remux itag {itag})"
+                        }
+                    };
+                }
+            }
+            catch
+            {
+                // ignore; last resort below
             }
 
-            if (sources.Count == 0)
-                return new[] { FallbackSource(id, vid) };
-
-            // Prefer itag 18 first; then by height desc; then progressive before video-only (by name hint)
-            var ordered = sources
-                .OrderByDescending(t => t.isItag18)
-                .ThenByDescending(t => t.height)
-                .ThenByDescending(t => (t.ms.Name?.Contains("progressive") ?? false))
-                .Select(t => t.ms)
-                .ToList();
-
-            return ordered;
+            // 3) Last resort: generic best-MP4 policy
+            return new[] { FallbackSource(id, vid) };
         }
-        // ====== END UPDATED METHOD ======
+        // ====== END MEDIA INFO ======
 
         // ---------- helpers ----------
 
@@ -273,8 +280,31 @@ namespace Jellyfin.Plugin.JellyTube.Channels
         private static string? Prop(JsonElement el, string name)
             => el.TryGetProperty(name, out var v) && v.ValueKind is JsonValueKind.String ? v.GetString() : null;
 
+        // ---- robust int parser (handles null/number/string) ----
         private static int? TryInt(JsonElement el, string name)
-            => el.TryGetProperty(name, out var v) && v.TryGetInt32(out var n) ? n : (int?)null;
+        {
+            if (!el.TryGetProperty(name, out var v))
+                return null;
+
+            switch (v.ValueKind)
+            {
+                case JsonValueKind.Number:
+                    if (v.TryGetInt32(out var n32)) return n32;
+                    if (v.TryGetInt64(out var n64) && n64 <= int.MaxValue) return (int)n64;
+                    if (v.TryGetDouble(out var d) && d >= int.MinValue && d <= int.MaxValue) return (int)d;
+                    return null;
+
+                case JsonValueKind.String:
+                    var s = v.GetString();
+                    if (int.TryParse(s, out var n)) return n;
+                    if (long.TryParse(s, out var l) && l <= int.MaxValue) return (int)l;
+                    if (double.TryParse(s, out var dd) && dd >= int.MinValue && dd <= int.MaxValue) return (int)dd;
+                    return null;
+
+                default:
+                    return null;
+            }
+        }
 
         private static bool Bool(JsonElement el, string name)
         {
@@ -296,9 +326,63 @@ namespace Jellyfin.Plugin.JellyTube.Channels
                 Protocol = MediaProtocol.Http,
                 Container = "mp4",
                 SupportsDirectPlay = true,
+                SupportsDirectStream = true,
                 SupportsTranscoding = true,
                 Name = "YouTube (best MP4)"
             };
+        }
+
+        // ---------- formats DTOs ----------
+        private sealed class FormatsResponse
+        {
+            [JsonPropertyName("id")] public string? Id { get; set; }
+            [JsonPropertyName("title")] public string? Title { get; set; }
+            [JsonPropertyName("formats")] public List<FormatItem>? Formats { get; set; }
+        }
+        private sealed class FormatItem
+        {
+            [JsonPropertyName("itag")] public string? Itag { get; set; }
+            [JsonPropertyName("ext")] public string? Ext { get; set; }
+            [JsonPropertyName("has_video")] public bool HasVideo { get; set; }
+            [JsonPropertyName("has_audio")] public bool HasAudio { get; set; }
+            [JsonPropertyName("vcodec")] public string? Vcodec { get; set; }
+            [JsonPropertyName("acodec")] public string? Acodec { get; set; }
+            [JsonPropertyName("height")] public int? Height { get; set; }
+            [JsonPropertyName("tbr")] public double? Tbr { get; set; }
+            [JsonPropertyName("quality_label")] public string? QualityLabel { get; set; }
+        }
+
+        // ---------- pick best video-only itag for split-remux ----------
+        private async Task<string?> PickBestVideoOnlyItagAsync(string videoId, int targetHeight, CancellationToken ct)
+        {
+            using var resp = await Http.GetAsync($"{BackendBase}/formats/{videoId}", ct);
+            resp.EnsureSuccessStatusCode();
+            var json = await resp.Content.ReadAsStringAsync(ct);
+
+            var fr = JsonSerializer.Deserialize<FormatsResponse>(json, J);
+            var fmts = fr?.Formats ?? new List<FormatItem>();
+            if (fmts.Count == 0) return null;
+
+            var vids = fmts.Where(f => f.HasVideo && !f.HasAudio && f.Height.HasValue).ToList();
+            if (vids.Count == 0) return null;
+
+            IEnumerable<FormatItem> pool = vids.Where(f => f.Height == targetHeight);
+            if (!pool.Any()) pool = vids.Where(f => f.Height <= 1080);
+            if (!pool.Any()) pool = vids;
+
+            var best = pool
+                .OrderByDescending(f =>
+                {
+                    var v = (f.Vcodec ?? "").ToLowerInvariant();
+                    var isAvc = v.Contains("avc");
+                    var isMp4 = string.Equals(f.Ext, "mp4", StringComparison.OrdinalIgnoreCase);
+                    var tbr = f.Tbr ?? 0;
+                    var h = f.Height ?? 0;
+                    return (isAvc ? 1_000_000 : 0) + (isMp4 ? 10_000 : 0) + (int)(tbr * 100) + h;
+                })
+                .FirstOrDefault();
+
+            return best?.Itag;
         }
 
         private sealed record FavItem(string VideoId, string? Title, string? Channel);
