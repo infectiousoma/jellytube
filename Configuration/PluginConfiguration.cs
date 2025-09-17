@@ -8,6 +8,8 @@ namespace Jellyfin.Plugin.JellyTube
     {
         public string BackendBaseUrl { get; set; } = "http://localhost:8080";
         public string FormatPolicy    { get; set; } = "h264_mp4";
+        public List<string> Subscriptions { get; set; } = new();  // UC… IDs
+        public List<string> FavoriteVideos { get; set; } = new(); // YouTube video IDs
 
         // Optional preconfigured sources
         public List<string> Channels   { get; set; } = new();   // YouTube channel IDs

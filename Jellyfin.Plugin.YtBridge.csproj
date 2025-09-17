@@ -1,34 +1,39 @@
 <Project Sdk="Microsoft.NET.Sdk">
- <PropertyGroup>
-<TargetFramework>net8.0</TargetFramework>
-<Nullable>enable</Nullable>
-<ImplicitUsings>enable</ImplicitUsings>
-<LangVersion>latest</LangVersion>
-<GenerateRuntimeConfigurationFiles>true</GenerateRuntimeConfigurationFiles>
-<AssemblyName>Jellyfin.Plugin.JellyTube</AssemblyName>
-<RootNamespace>Jellyfin.Plugin.JellyTube</RootNamespace>
-<!-- Disable auto-generated assembly attributes to avoid conflicts -->
-<GenerateAssemblyInfo>false</GenerateAssemblyInfo>
-<GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
-<CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
-<!-- Handle package version conflicts -->
-<TreatWarningsAsErrors>false</TreatWarningsAsErrors>
-<NoWarn>$(NoWarn);NU1605</NoWarn>
-<RestoreIgnoreFailedSources>true</RestoreIgnoreFailedSources>
-</PropertyGroup>
-<ItemGroup>
-<!-- Match these to your Jellyfin server's Target ABI if different -->
-<PackageReference Include="Jellyfin.Controller" Version="10.10.7" />
-<PackageReference Include="Jellyfin.Model" Version="10.10.7" />
-<PackageReference Include="Jellyfin.Common" Version="10.10.7" />
-<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.2" />
-</ItemGroup>
-<ItemGroup>
-<Compile Remove="Providers/*.cs" />
-<Compile Remove="MediaSources/*.cs" />
-</ItemGroup>
-<ItemGroup>
-  <EmbeddedResource Include="Configuration/configPage.html"
-                    LogicalName="Jellyfin.Plugin.JellyTube.Configuration.configPage.html" />
-</ItemGroup>
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+
+    <AssemblyName>Jellyfin.Plugin.JellyTube</AssemblyName>
+    <RootNamespace>Jellyfin.Plugin.JellyTube</RootNamespace>
+
+    <!-- Plugin/library-friendly settings -->
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
+    <GenerateRuntimeConfigurationFiles>true</GenerateRuntimeConfigurationFiles>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <RestoreIgnoreFailedSources>true</RestoreIgnoreFailedSources>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Match your server (10.10.7) -->
+    <PackageReference Include="Jellyfin.Controller" Version="10.10.7" />
+    <PackageReference Include="Jellyfin.Model"      Version="10.10.7" />
+    <PackageReference Include="Jellyfin.Common"     Version="10.10.7" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- If you intentionally exclude these files -->
+    <Compile Remove="Providers/*.cs" />
+    <Compile Remove="MediaSources/*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Make sure LogicalName matches what your Plugin.cs references -->
+    <EmbeddedResource Include="Configuration/configPage.html"
+                      LogicalName="Jellyfin.Plugin.JellyTube.Configuration.configPage.html" />
+  </ItemGroup>
 </Project>
