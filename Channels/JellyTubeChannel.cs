@@ -91,13 +91,27 @@ namespace Jellyfin.Plugin.JellyTube.Channels
         private static readonly int PreflightMax = Math.Max(1, EnvInt("JELLYTUBE_PREFLIGHT_MAX", 5));
         private static readonly int UiMaxPageSize = Math.Min(Math.Max(50, EnvInt("JELLYTUBE_MAX_PAGE_SIZE", 500)), 2000);
 
+        // Prefer the very robust 360p progressive by default
+        private static readonly bool PreferStable360 = EnvBool("JELLYTUBE_PREFER_STABLE_360", true);
+
+        // Force Jellyfin to transcode instead of remux/copy (works around ffmpeg exit 8 on some sources)
+        private static readonly bool ForceTranscode = EnvBool("JELLYTUBE_FORCE_TRANSCODE", true);
+
+        // NEW: read >1 byte in preflight to avoid false positives (0 keeps old behavior)
+        private static readonly long PreflightBytes = Math.Max(0, EnvInt("JELLYTUBE_PREFLIGHT_BYTES", 65536)); // 64KiB default
+
+        // NEW: soft fallback order when preflight finds nothing
+        private static readonly string[] SoftOrder = (
+            Environment.GetEnvironmentVariable("JELLYTUBE_SOFT_ORDER") ?? "policy,22,18"
+        ).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
         // -------------------- channel metadata --------------------
         public string Name => "JellyTube";
         public string Description => "YouTube via JellyTube bridge";
         public string HomePageUrl => string.Empty;
 
         // bump this so Jellyfin refreshes cached rows
-        public string DataVersion => "0.0.6";
+        public string DataVersion => "0.0.8";
 
         public ChannelParentalRating ParentalRating => ChannelParentalRating.GeneralAudience;
 
@@ -247,8 +261,8 @@ namespace Jellyfin.Plugin.JellyTube.Channels
             if (string.IsNullOrWhiteSpace(vid))
                 return Array.Empty<MediaSourceInfo>();
 
-            _log?.LogInformation("JT: mediaInfo id={Id} vid={Vid} base={Base} policy={Policy} progressiveOnly={ProgOnly} preflight={Preflight} preflightMax={PMax}",
-                id, vid, BackendBase, PolicyRaw, ProgressiveOnly, !DisablePreflight, PreflightMax);
+            _log?.LogInformation("JT: mediaInfo id={Id} vid={Vid} base={Base} policy={Policy} progressiveOnly={ProgOnly} preflight={Preflight} preflightMax={PMax} preflightBytes={PBytes}",
+                id, vid, BackendBase, PolicyRaw, ProgressiveOnly, !DisablePreflight, PreflightMax, PreflightBytes);
 
             var candidates = new List<(MediaSourceInfo ms, int prio)>();
 
@@ -282,14 +296,22 @@ namespace Jellyfin.Plugin.JellyTube.Channels
                                    (isMp4 ? 10_000 : 0) +
                                    height;
 
+                        if (PreferStable360)
+                        {
+                            if (itag == "18") prio += 1_000_000;
+                            if (itag == "22") prio -= 100_000;
+                        }
+
                         candidates.Add((NewMs($"{id}@{itag}",
                             $"{BackendBase}/play/{vid}?itag={Uri.EscapeDataString(itag)}",
                             f.Ext ?? "mp4",
                             $"{(height > 0 ? $"{height}p" : "auto")} progressive (itag {itag})",
-                            "h264", "aac"), prio));
+                            "h264", "aac",
+                            includeStreams: false // let Jellyfin probe, avoids wrong -map
+                        ), prio));
                     }
 
-                    // Optionally include video-only (lets Jellyfin transcode, but can be flaky)
+                    // Optionally include video-only (lets Jellyfin transcode)
                     if (!ProgressiveOnly)
                     {
                         foreach (var f in videoOnly)
@@ -309,7 +331,9 @@ namespace Jellyfin.Plugin.JellyTube.Channels
                                 $"{BackendBase}/play/{vid}?itag={Uri.EscapeDataString(itag)}",
                                 f.Ext ?? "mp4",
                                 $"{(height > 0 ? $"{height}p" : "auto")} video-only (itag {itag})",
-                                "h264", null), prio));
+                                "h264", null,
+                                includeStreams: false // also let Jellyfin probe
+                            ), prio));
                         }
                     }
                 }
@@ -323,43 +347,89 @@ namespace Jellyfin.Plugin.JellyTube.Channels
             if (candidates.Count == 0)
             {
                 candidates.Add((NewMs($"{id}@22", $"{BackendBase}/play/{vid}?itag=22",
-                    "mp4", "720p progressive (itag 22)", "h264", "aac"), 900_000));
+                    "mp4", "720p progressive (itag 22)", "h264", "aac", includeStreams: false), 900_000));
 
                 candidates.Add((NewMs($"{id}@18", $"{BackendBase}/play/{vid}?itag=18",
-                    "mp4", "360p progressive (itag 18)", "h264", "aac"), 800_000));
+                    "mp4", "360p progressive (itag 18)", "h264", "aac", includeStreams: false), 800_000));
             }
 
-            // 3) Policy last resort — do NOT advertise streams (avoids ffmpeg -map errors on video-only redirects)
+            // 3) Prepare policy candidate (may be used first if preflight fails)
             var policyMs = NewMs($"{id}@policy",
                 $"{BackendBase}/play/{vid}?policy={PolicyEnc}",
                 "mp4", $"Policy: {PolicyRaw}", "h264", null, includeStreams: false);
-            candidates.Add((policyMs, 100));
 
-            // 4) Preflight (Range: 0-0) a few best candidates
+            // 4) Preflight a few best candidates
             var ordered = candidates.OrderByDescending(t => t.prio).Select(t => t.ms).ToList();
-            List<MediaSourceInfo> playable;
+            var playable = new List<MediaSourceInfo>();
+            var usedSoftFallback = false;
 
             if (DisablePreflight)
             {
                 _log?.LogInformation("JT: preflight disabled; returning top candidate(s)");
-                playable = ordered.Take(3).ToList();
+                playable.AddRange(ordered.Take(3));
             }
             else
             {
-                playable = new List<MediaSourceInfo>();
                 var slice = ordered.Take(PreflightMax).ToList();
                 foreach (var ms in slice)
                 {
-                    if (!string.IsNullOrEmpty(ms.Path) && await IsUrlPlayableAsync(ms.Path, ct))
+                    if (!string.IsNullOrEmpty(ms.Path) && await IsUrlPlayableAsync(ms.Path, PreflightBytes, ct))
                         playable.Add(ms);
+                }
+
+                // SOFT PREFLIGHT: if none passed, follow configured soft order
+                if (playable.Count == 0)
+                {
+                    usedSoftFallback = true;
+
+                    // quick lookup of candidates by itag suffix
+                    var pool = ordered.ToDictionary(k => k.Id ?? string.Empty, v => v, StringComparer.OrdinalIgnoreCase);
+
+                    foreach (var key in SoftOrder)
+                    {
+                        if (key.Equals("policy", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (!playable.Contains(policyMs)) playable.Add(policyMs);
+                            continue;
+                        }
+                        var pick = pool.Values.FirstOrDefault(ms => (ms.Id ?? "").EndsWith("@" + key, StringComparison.Ordinal));
+                        if (pick != null && !playable.Contains(pick)) playable.Add(pick);
+                    }
+
+                    // fill with any remaining ordered ones (avoid dupes)
+                    foreach (var ms in ordered)
+                        if (!playable.Contains(ms)) playable.Add(ms);
                 }
             }
 
-            if (playable.Count == 0) playable.Add(policyMs);
-            _log?.LogInformation("JT: candidates={C} playable={P} (preflight {Pref} max={Max})",
-                ordered.Count, playable.Count, DisablePreflight ? "off" : "on", PreflightMax);
+            // If preflight succeeded, append policy LAST; if it failed we already inserted it via SoftOrder
+            if (!usedSoftFallback)
+                playable.Add(policyMs);
+
+            _log?.LogInformation("JT: candidates={C} playable={P} (preflight {Pref} max={Max} soft={Soft})",
+                ordered.Count, playable.Count, DisablePreflight ? "off" : $"on/{PreflightBytes}B", PreflightMax, usedSoftFallback);
+
+            // Prefer stable ordering only when preflight succeeded (don’t override SoftOrder)
+            if (!usedSoftFallback)
+                playable = playable.OrderBy(StableRank).ToList();
+
+            if (playable.Count > 0)
+            {
+                var first = playable[0];
+                _log?.LogInformation("JT: first-choice id={Id} name={Name} path={Path}", first.Id, first.Name, first.Path);
+            }
 
             return playable;
+        }
+
+        // Prefer stable ordering helper
+        private static int StableRank(MediaSourceInfo ms)
+        {
+            var id = ms.Id ?? "";
+            if (id.EndsWith("@18", StringComparison.Ordinal)) return 0;   // most reliable
+            if (id.EndsWith("@22", StringComparison.Ordinal)) return 1;   // often fine, but flaky in some cases
+            if (id.EndsWith("@policy", StringComparison.Ordinal)) return 9;
+            return 2; // other itags in between
         }
 
         // -------------------- helpers (HTTP) --------------------
@@ -459,26 +529,45 @@ namespace Jellyfin.Plugin.JellyTube.Channels
             }
         }
 
-        // Range GET preflight
-        private static async Task<bool> IsUrlPlayableAsync(string url, CancellationToken outerCt)
+        // Range GET preflight (optionally read N bytes instead of 1)
+        private static async Task<bool> IsUrlPlayableAsync(string url, long bytesToRead, CancellationToken outerCt)
         {
             try
             {
                 using var req = new HttpRequestMessage(HttpMethod.Get, url);
-                req.Headers.Range = new RangeHeaderValue(0, 0);
+                if (bytesToRead <= 0)
+                    req.Headers.Range = new RangeHeaderValue(0, 0);
+                else
+                    req.Headers.Range = new RangeHeaderValue(0, bytesToRead - 1);
+
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(outerCt);
                 cts.CancelAfter(PreflightTimeout);
                 using var resp = await Http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cts.Token);
 
                 var status = (int)resp.StatusCode;
-                if (status == 206) return true;
-                if (status == 200)
+                if (status != 200 && status != 206) return false;
+
+                if (bytesToRead <= 0)
                 {
                     var hasLen = resp.Content.Headers.ContentLength.GetValueOrDefault() > 0;
                     var chunked = resp.Headers.TransferEncodingChunked == true;
-                    return hasLen || chunked;
+                    return status == 206 || hasLen || chunked;
                 }
-                return false;
+
+                // Stream-read up to bytesToRead; succeed if we read anything
+                using var stream = await resp.Content.ReadAsStreamAsync(cts.Token);
+                var buf = new byte[8192];
+                long remaining = bytesToRead;
+                long readTotal = 0;
+                while (remaining > 0)
+                {
+                    var want = (int)Math.Min(buf.Length, remaining);
+                    var read = await stream.ReadAsync(buf.AsMemory(0, want), cts.Token);
+                    if (read <= 0) break;
+                    readTotal += read;
+                    remaining -= read;
+                }
+                return readTotal > 0;
             }
             catch { return false; }
         }
@@ -560,9 +649,12 @@ namespace Jellyfin.Plugin.JellyTube.Channels
                 Path = url,
                 Protocol = MediaProtocol.Http,
                 Container = container,
-                SupportsDirectPlay = true,
-                SupportsDirectStream = true,
-                SupportsTranscoding = true,
+
+                // Force transcoding when requested (removes fragile remux paths causing ffmpeg code 8)
+                SupportsDirectPlay   = !ForceTranscode,
+                SupportsDirectStream = !ForceTranscode,
+                SupportsTranscoding  = true,
+
                 IsInfiniteStream = false,
                 RequiresOpening = false,
                 Name = $"YouTube {name}"
