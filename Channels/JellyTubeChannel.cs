@@ -14,6 +14,7 @@ using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.MediaInfo;
 using Microsoft.Extensions.Logging;
+// using Jellyfin.Data.Enums; // MediaStreamProtocol (not needed for 10.10.x fix)
 
 namespace Jellyfin.Plugin.JellyTube.Channels
 {
@@ -43,13 +44,6 @@ namespace Jellyfin.Plugin.JellyTube.Channels
         private static string PolicyEnc => Uri.EscapeDataString(PolicyRaw);
 
         // -------- Optional timeouts / feature flags (ENV) --------
-        // General: JELLYTUBE_HTTP_TIMEOUT_MS
-        // Specific: JELLYTUBE_LIST_TIMEOUT_MS, JELLYTUBE_FORMATS_TIMEOUT_MS, JELLYTUBE_PREFLIGHT_TIMEOUT_MS
-        // Flags:
-        //   JELLYTUBE_PROGRESSIVE_ONLY (=true) -> ignore video-only itags
-        //   JELLYTUBE_DISABLE_PREFLIGHT (=false) -> skip Range checks
-        //   JELLYTUBE_PREFLIGHT_MAX (=5) -> cap how many candidates to preflight
-        //   JELLYTUBE_MAX_PAGE_SIZE (=500) -> UI paging hint for Jellyfin
         private static bool EnvBool(string name, bool def = false)
         {
             var v = Environment.GetEnvironmentVariable(name);
@@ -97,13 +91,31 @@ namespace Jellyfin.Plugin.JellyTube.Channels
         // Force Jellyfin to transcode instead of remux/copy (works around ffmpeg exit 8 on some sources)
         private static readonly bool ForceTranscode = EnvBool("JELLYTUBE_FORCE_TRANSCODE", true);
 
-        // NEW: read >1 byte in preflight to avoid false positives (0 keeps old behavior)
+        private static readonly bool ForceHlsTs = EnvBool("JELLYTUBE_HLS_TS", false);
+
+        // Read >1 byte in preflight to avoid false positives (0 keeps old behavior)
         private static readonly long PreflightBytes = Math.Max(0, EnvInt("JELLYTUBE_PREFLIGHT_BYTES", 65536)); // 64KiB default
 
-        // NEW: soft fallback order when preflight finds nothing
-        private static readonly string[] SoftOrder = (
-            Environment.GetEnvironmentVariable("JELLYTUBE_SOFT_ORDER") ?? "policy,22,18"
-        ).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        // Policy handling
+        private static readonly bool IncludePolicy = EnvBool("JELLYTUBE_INCLUDE_POLICY", true);
+        private static readonly bool AllowPolicyOnSoft = EnvBool("JELLYTUBE_ALLOW_POLICY_SOFT", false);
+
+        // Prefer policy if /formats fails, or even earlier if configured
+        private static readonly bool PolicyFirst = EnvBool("JELLYTUBE_POLICY_FIRST", true);
+        private static readonly bool PolicyOnFormatsError = EnvBool("JELLYTUBE_POLICY_ON_FORMATS_ERROR", true);
+
+        // Block bad itags (defaults to block 22 which is flaky for many)
+        private static readonly HashSet<string> BlockItags =
+            new HashSet<string>(
+                (Environment.GetEnvironmentVariable("JELLYTUBE_BLOCK_ITAGS") ?? "")
+                    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+                StringComparer.OrdinalIgnoreCase);
+
+        static JellyTubeChannel()
+        {
+            if (!BlockItags.Contains("22"))
+                BlockItags.Add("22");
+        }
 
         // -------------------- channel metadata --------------------
         public string Name => "JellyTube";
@@ -111,7 +123,7 @@ namespace Jellyfin.Plugin.JellyTube.Channels
         public string HomePageUrl => string.Empty;
 
         // bump this so Jellyfin refreshes cached rows
-        public string DataVersion => "0.0.8";
+        public string DataVersion => "0.1.4";
 
         public ChannelParentalRating ParentalRating => ChannelParentalRating.GeneralAudience;
 
@@ -265,6 +277,9 @@ namespace Jellyfin.Plugin.JellyTube.Channels
                 id, vid, BackendBase, PolicyRaw, ProgressiveOnly, !DisablePreflight, PreflightMax, PreflightBytes);
 
             var candidates = new List<(MediaSourceInfo ms, int prio)>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            bool has18 = false, has22 = false;
+            bool formatsErrored = false;
 
             // 1) Formats
             try
@@ -278,45 +293,43 @@ namespace Jellyfin.Plugin.JellyTube.Channels
                     var fr = JsonSerializer.Deserialize<FormatsResponse>(json, J);
                     var fmts = fr?.Formats ?? new List<FormatItem>();
 
-                    IEnumerable<FormatItem> withAV = fmts.Where(f => f.HasVideo && f.HasAudio);
-                    IEnumerable<FormatItem> videoOnly = fmts.Where(f => f.HasVideo && !f.HasAudio);
-
-                    // Progressive (A/V) first
-                    foreach (var f in withAV)
+                    foreach (var f in fmts)
                     {
                         var itag = f.Itag; if (string.IsNullOrWhiteSpace(itag)) continue;
-                        var height = f.Height ?? 0;
-                        var v = (f.Vcodec ?? "").ToLowerInvariant();
-                        var isAvc = v.Contains("avc") || v.Contains("h264");
-                        var isMp4 = string.Equals(f.Ext, "mp4", StringComparison.OrdinalIgnoreCase);
+                        if (itag == "18") has18 = true; else if (itag == "22") has22 = true;
+                        if (BlockItags.Contains(itag)) continue;
 
-                        var prio = (itag == "22" ? 1_000_000 : 0) +
-                                   (itag == "18" ? 500_000 : 0) +
-                                   (isAvc ? 50_000 : 0) +
-                                   (isMp4 ? 10_000 : 0) +
-                                   height;
-
-                        if (PreferStable360)
+                        if (f.HasVideo && f.HasAudio)
                         {
-                            if (itag == "18") prio += 1_000_000;
-                            if (itag == "22") prio -= 100_000;
+                            var height = f.Height ?? 0;
+                            var v = (f.Vcodec ?? "").ToLowerInvariant();
+                            var isAvc = v.Contains("avc") || v.Contains("h264");
+                            var isMp4 = string.Equals(f.Ext, "mp4", StringComparison.OrdinalIgnoreCase);
+
+                            var prio = (itag == "22" ? 1_000_000 : 0) +
+                                       (itag == "18" ? 500_000 : 0) +
+                                       (isAvc ? 50_000 : 0) +
+                                       (isMp4 ? 10_000 : 0) +
+                                       height;
+
+                            if (PreferStable360)
+                            {
+                                if (itag == "18") prio += 1_000_000;
+                                if (itag == "22") prio -= 100_000;
+                            }
+
+                            var ms = NewMs($"{id}@{itag}",
+                                $"{BackendBase}/play/{vid}?itag={Uri.EscapeDataString(itag)}",
+                                f.Ext ?? "mp4",
+                                $"{(height > 0 ? $"{height}p" : "auto")} progressive (itag {itag})",
+                                "h264", "aac",
+                                includeStreams: true);
+
+                            if (seen.Add(ms.Id!))
+                                candidates.Add((ms, prio));
                         }
-
-                        candidates.Add((NewMs($"{id}@{itag}",
-                            $"{BackendBase}/play/{vid}?itag={Uri.EscapeDataString(itag)}",
-                            f.Ext ?? "mp4",
-                            $"{(height > 0 ? $"{height}p" : "auto")} progressive (itag {itag})",
-                            "h264", "aac",
-                            includeStreams: false // let Jellyfin probe, avoids wrong -map
-                        ), prio));
-                    }
-
-                    // Optionally include video-only (lets Jellyfin transcode)
-                    if (!ProgressiveOnly)
-                    {
-                        foreach (var f in videoOnly)
+                        else if (!ProgressiveOnly && f.HasVideo && !f.HasAudio)
                         {
-                            var itag = f.Itag; if (string.IsNullOrWhiteSpace(itag)) continue;
                             var height = f.Height ?? 0;
                             var v = (f.Vcodec ?? "").ToLowerInvariant();
                             var isAvc = v.Contains("avc") || v.Contains("h264");
@@ -327,39 +340,68 @@ namespace Jellyfin.Plugin.JellyTube.Channels
                                        (isMp4 ? 5_000 : 0) +
                                        height;
 
-                            candidates.Add((NewMs($"{id}@{itag}",
+                            var ms = NewMs($"{id}@{itag}",
                                 $"{BackendBase}/play/{vid}?itag={Uri.EscapeDataString(itag)}",
                                 f.Ext ?? "mp4",
                                 $"{(height > 0 ? $"{height}p" : "auto")} video-only (itag {itag})",
                                 "h264", null,
-                                includeStreams: false // also let Jellyfin probe
-                            ), prio));
+                                includeStreams: false);
+
+                            if (seen.Add(ms.Id!))
+                                candidates.Add((ms, prio));
                         }
                     }
+                }
+                else
+                {
+                    formatsErrored = true;
+                    _log?.LogWarning("JT: /formats non-success {Status} for vid={Vid}", (int)resp.StatusCode, vid);
+                    if (PolicyOnFormatsError) { has18 = has22 = true; } // suppress forced itag fallbacks
                 }
             }
             catch (Exception ex)
             {
+                formatsErrored = true;
                 _log?.LogWarning(ex, "JT: formats failed for vid={Vid}", vid);
+                if (PolicyOnFormatsError) { has18 = has22 = true; } // suppress forced itag fallbacks
             }
 
-            // 2) Progressive fallbacks if formats missing
-            if (candidates.Count == 0)
+            // 2) Ensure progressive fallbacks exist (dedup) — respect BlockItags
+            void EnsureFallback(string itag, int basePrio, string label)
             {
-                candidates.Add((NewMs($"{id}@22", $"{BackendBase}/play/{vid}?itag=22",
-                    "mp4", "720p progressive (itag 22)", "h264", "aac", includeStreams: false), 900_000));
+                if (BlockItags.Contains(itag)) return;
 
-                candidates.Add((NewMs($"{id}@18", $"{BackendBase}/play/{vid}?itag=18",
-                    "mp4", "360p progressive (itag 18)", "h264", "aac", includeStreams: false), 800_000));
+                var ms = NewMs($"{id}@{itag}",
+                    $"{BackendBase}/play/{vid}?itag={Uri.EscapeDataString(itag)}",
+                    "mp4", $"{label} progressive (itag {itag})", "h264", "aac",
+                    includeStreams: true);
+
+                if (seen.Add(ms.Id!))
+                    candidates.Add((ms, basePrio));
             }
 
-            // 3) Prepare policy candidate (may be used first if preflight fails)
-            var policyMs = NewMs($"{id}@policy",
-                $"{BackendBase}/play/{vid}?policy={PolicyEnc}",
-                "mp4", $"Policy: {PolicyRaw}", "h264", null, includeStreams: false);
+            if (!has22) EnsureFallback("22", 900_000, "720p");
+            if (!has18) EnsureFallback("18", PreferStable360 ? 1_100_000 : 800_000, "360p");
 
-            // 4) Preflight a few best candidates
+            // 3) Prepare policy candidate and preflight ordering
+            MediaSourceInfo? policyMs = null;
+            if (IncludePolicy)
+            {
+                policyMs = NewMs($"{id}@policy",
+                    $"{BackendBase}/play/{vid}?policy={PolicyEnc}",
+                    "mp4", $"Policy: {PolicyRaw}", "h264", null, includeStreams: false);
+            }
+
             var ordered = candidates.OrderByDescending(t => t.prio).Select(t => t.ms).ToList();
+
+            // Prefer policy very early when configured
+            if (PolicyFirst && policyMs != null && !ordered.Any(ms => string.Equals(ms.Id, policyMs.Id, StringComparison.Ordinal)))
+                ordered.Insert(0, policyMs);
+
+            // If nothing at all, at least return policy so playback has a shot
+            if (ordered.Count == 0 && policyMs != null)
+                ordered.Add(policyMs);
+
             var playable = new List<MediaSourceInfo>();
             var usedSoftFallback = false;
 
@@ -373,45 +415,51 @@ namespace Jellyfin.Plugin.JellyTube.Channels
                 var slice = ordered.Take(PreflightMax).ToList();
                 foreach (var ms in slice)
                 {
-                    if (!string.IsNullOrEmpty(ms.Path) && await IsUrlPlayableAsync(ms.Path, PreflightBytes, ct))
+                    if (string.IsNullOrEmpty(ms.Path)) continue;
+
+                    var ok = await IsUrlPlayableAsync(ms.Path, PreflightBytes, ct);
+                    if (ok)
+                    {
                         playable.Add(ms);
+                    }
+                    else
+                    {
+                        var hint = await QuickStatusAsync(ms.Path, ct);
+                        if (!string.IsNullOrEmpty(hint))
+                            _log?.LogWarning("JT: preflight fail path={Path} hint={Hint}", ms.Path, hint);
+                    }
                 }
 
-                // SOFT PREFLIGHT: if none passed, follow configured soft order
-                if (playable.Count == 0)
+                // SOFT PREFLIGHT: if none passed, prefer policy first, then everything else
+                if (playable.Count == 0 && ordered.Count > 0)
                 {
                     usedSoftFallback = true;
 
-                    // quick lookup of candidates by itag suffix
-                    var pool = ordered.ToDictionary(k => k.Id ?? string.Empty, v => v, StringComparer.OrdinalIgnoreCase);
+                    if (policyMs != null && !playable.Contains(policyMs))
+                        playable.Add(policyMs);
 
-                    foreach (var key in SoftOrder)
-                    {
-                        if (key.Equals("policy", StringComparison.OrdinalIgnoreCase))
-                        {
-                            if (!playable.Contains(policyMs)) playable.Add(policyMs);
-                            continue;
-                        }
-                        var pick = pool.Values.FirstOrDefault(ms => (ms.Id ?? "").EndsWith("@" + key, StringComparison.Ordinal));
-                        if (pick != null && !playable.Contains(pick)) playable.Add(pick);
-                    }
-
-                    // fill with any remaining ordered ones (avoid dupes)
                     foreach (var ms in ordered)
                         if (!playable.Contains(ms)) playable.Add(ms);
                 }
             }
 
-            // If preflight succeeded, append policy LAST; if it failed we already inserted it via SoftOrder
-            if (!usedSoftFallback)
+            // If preflight succeeded, append policy LAST (backup only)
+            if (!usedSoftFallback && policyMs != null && !playable.Contains(policyMs))
                 playable.Add(policyMs);
 
-            _log?.LogInformation("JT: candidates={C} playable={P} (preflight {Pref} max={Max} soft={Soft})",
-                ordered.Count, playable.Count, DisablePreflight ? "off" : $"on/{PreflightBytes}B", PreflightMax, usedSoftFallback);
+            // Summary log AFTER variables exist (and includes formatsErrored)
+            _log?.LogInformation(
+                "JT: candidates={C} playable={P} (formatsError={FE} preflight {Pref}/{Bytes}B max={Max} soft={Soft})",
+                ordered.Count,
+                playable.Count,
+                formatsErrored,
+                DisablePreflight ? "off" : "on",
+                PreflightBytes,
+                PreflightMax,
+                usedSoftFallback);
 
-            // Prefer stable ordering only when preflight succeeded (don’t override SoftOrder)
-            if (!usedSoftFallback)
-                playable = playable.OrderBy(StableRank).ToList();
+            // 5) Final deterministic ordering: 18 -> 22 -> others -> policy
+            playable = playable.OrderBy(StableRank).ToList();
 
             if (playable.Count > 0)
             {
@@ -427,7 +475,7 @@ namespace Jellyfin.Plugin.JellyTube.Channels
         {
             var id = ms.Id ?? "";
             if (id.EndsWith("@18", StringComparison.Ordinal)) return 0;   // most reliable
-            if (id.EndsWith("@22", StringComparison.Ordinal)) return 1;   // often fine, but flaky in some cases
+            if (id.EndsWith("@22", StringComparison.Ordinal)) return 1;   // often flaky
             if (id.EndsWith("@policy", StringComparison.Ordinal)) return 9;
             return 2; // other itags in between
         }
@@ -443,10 +491,64 @@ namespace Jellyfin.Plugin.JellyTube.Channels
             return body;
         }
 
+        // Lightweight status probe to help understand preflight failures
+        private static async Task<string> QuickStatusAsync(string url, CancellationToken outerCt)
+        {
+            try
+            {
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(outerCt);
+                cts.CancelAfter(TimeSpan.FromSeconds(5));
+
+                using var req = new HttpRequestMessage(HttpMethod.Get, url);
+                // ask for a single byte; many origins omit useful headers on HEAD
+                req.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(0, 0);
+
+                using var resp = await Http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+
+                var status = (int)resp.StatusCode;
+                var ctHdr  = resp.Content?.Headers?.ContentType?.ToString();
+                var len    = resp.Content?.Headers?.ContentLength;
+
+                // Content-Range (prefer content header; fall back to raw header)
+                string? cr = null;
+                var crHeader = resp.Content?.Headers?.ContentRange;
+                if (crHeader != null)
+                    cr = crHeader.ToString();
+                if (cr == null && resp.Headers.TryGetValues("Content-Range", out var crVals))
+                    cr = crVals.FirstOrDefault();
+
+                // Accept-Ranges
+                string? ar = null;
+                if (resp.Headers.TryGetValues("Accept-Ranges", out var arVals))
+                    ar = arVals.FirstOrDefault();
+
+                // drain a byte so the connection can be cleanly reused
+                try
+                {
+                    var content = resp.Content;
+                    if (content != null)
+                    {
+                        using var s = await content.ReadAsStreamAsync(cts.Token);
+                        var one = new byte[1];
+                        _ = await s.ReadAsync(one.AsMemory(0, 1), cts.Token);
+                    }
+                }
+                catch
+                {
+                    // ignore – this is best-effort
+                }
+
+                return $"status={status} type={(ctHdr ?? "-")} len={(len?.ToString() ?? "-")} cr={(cr ?? "-")} ar={(ar ?? "-")}";
+            }
+            catch (Exception ex)
+            {
+                return $"status=ERR ex={ex.GetType().Name}";
+            }
+        }
+
         // Windowed favorites fetch that works with offset/limit or page-only backends
         private async Task<List<FavItem>> FetchFavoritesWindowAsync(int start, int takePlusOne, CancellationToken ct)
         {
-            // 1) Try common offset/limit styles
             var probes = new[]
             {
                 $"{BackendBase}/favorites?offset={start}&limit={takePlusOne}",
@@ -471,7 +573,7 @@ namespace Jellyfin.Plugin.JellyTube.Channels
                 }
             }
 
-            // 2) Fallback: aggregate pages until we cover [start, start+takePlusOne)
+            // Fallback: aggregate pages until we cover [start, start+takePlusOne)
             var acc = new List<FavItem>();
             for (var page = 1; acc.Count < start + takePlusOne && page <= 200; page++)
             {
@@ -670,6 +772,13 @@ namespace Jellyfin.Plugin.JellyTube.Channels
                     streams.Add(new MediaStream { Type = MediaStreamType.Audio, Codec = audioCodec!, Index = 1 });
 
                 ms.MediaStreams = streams;
+            }
+
+            if (ForceHlsTs)
+            {
+                // Ask Jellyfin to use HLS with MPEG-TS segments instead of fMP4
+                ms.TranscodingContainer = "ts";
+                // Do NOT set TranscodingSubProtocol here; older Jellyfin builds lack the enum value.
             }
 
             return ms;
